@@ -1,0 +1,1408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>海上生明月 — 星雨与海面焰火</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #020617;
+      touch-action: none;
+      overscroll-behavior: none;
+    }
+    /* Landscape Stage Wrapper:
+       When opened on a phone in portrait mode (width < height),
+       this container automatically rotates 90deg and swaps width/height
+       so the scene immediately fills the screen in landscape orientation! */
+    #stageWrapper {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform-origin: center center;
+      overflow: hidden;
+      background-color: #020617;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body class="relative w-full h-full">
+
+  <!-- Auto-Landscape Stage Wrapper -->
+  <div id="stageWrapper">
+    <!-- Pure Fullscreen Simulation Canvas -->
+    <canvas id="seaCanvas"></canvas>
+
+    <!-- Minimal Icon-Only Sound Toggle Button (Anchored to Landscape Top-Right) -->
+    <button id="btnSoundToggle" type="button" aria-label="Toggle Sound"
+      class="absolute top-3 right-3 sm:top-4 sm:right-4 z-20 w-9 h-9 rounded-full flex items-center justify-center bg-slate-900/50 hover:bg-slate-800/70 border border-white/15 text-sm backdrop-blur-md transition opacity-70 hover:opacity-100">
+      <span id="soundIcon">🔊</span>
+    </button>
+  </div>
+
+  <script>
+    (function () {
+      const stageWrapper = document.getElementById('stageWrapper');
+      const canvas = document.getElementById('seaCanvas');
+      const ctx = canvas.getContext('2d');
+      const btnSoundToggle = document.getElementById('btnSoundToggle');
+      const soundIcon = document.getElementById('soundIcon');
+
+      // Classic Night Sea Theme
+      const THEME = {
+        skyTop: '#020617',
+        skyMid: '#07142b',
+        skyHorizon: '#152c4a',
+        seaHorizon: '#0a1c36',
+        seaMid: '#051021',
+        seaDeep: '#02060f',
+        moonCore: '#fffef5',
+        moonTint: [255, 244, 214],
+        glowTint: [186, 218, 255],
+        specTint: [255, 248, 224]
+      };
+
+      // Fixed State: Moon & reflection path fixed at 1/5 (0.20) from the left edge of the landscape stage
+      const state = {
+        width: Math.max(window.innerWidth, window.innerHeight),
+        height: Math.min(window.innerWidth, window.innerHeight),
+        scale: 1.0,
+        isRotatedPortrait: false,
+        horizonRatio: 0.54,
+        moonX: 0.20,       // Fixed at 1/5 of landscape screen width from left border
+        moonY: 0.24,       // Fixed elevation in sky
+        moonRadius: 46,
+        wind: 0.32,
+        shimmer: 0.78,
+        cloudsOpacity: 0.42,
+        time: 0
+      };
+
+      // Scene Objects
+      let stars = [];
+      let clouds = [];
+      let meteors = [];
+      let shells = [];
+      let shellSparks = [];
+      let fireworks = [];
+      let crackleClusters = [];
+      let moonOffscreen = null;
+
+      // Firework scheduling after 3 seconds of opening meteor shower
+      let nextSalvoTime = 3.0;
+      let salvoCount = 0;
+
+      // ============================================================================
+      // Synthesized Pyrotechnic Sound Engine (Web Audio API)
+      // Realistic Mortar Launch + Deep Aerial Boom + 5-Layer Scattering Sizzle + Crackle Pops
+      // ============================================================================
+      let audioCtx = null;
+      let noiseBuffer = null;
+      let soundMuted = false;
+
+      function ensureAudioContext() {
+        if (soundMuted) return null;
+        if (!audioCtx) {
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextClass) return null;
+          audioCtx = new AudioContextClass();
+
+          const sampleRate = audioCtx.sampleRate;
+          noiseBuffer = audioCtx.createBuffer(1, sampleRate * 2, sampleRate);
+          const data = noiseBuffer.getChannelData(0);
+          for (let i = 0; i < data.length; i++) {
+            data[i] = Math.random() * 2 - 1;
+          }
+        }
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
+        return audioCtx;
+      }
+
+      function updateSoundIcon() {
+        soundIcon.textContent = soundMuted ? '🔇' : '🔊';
+      }
+
+      function unlockAudioOnGesture() {
+        if (!soundMuted) {
+          ensureAudioContext();
+        }
+        // Also try native Screen Orientation API lock where supported
+        if (screen.orientation && screen.orientation.lock) {
+          screen.orientation.lock('landscape').catch(() => {});
+        }
+      }
+      window.addEventListener('pointerdown', unlockAudioOnGesture, { passive: true });
+      window.addEventListener('touchstart', unlockAudioOnGesture, { passive: true });
+      window.addEventListener('keydown', unlockAudioOnGesture, { passive: true });
+
+      btnSoundToggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        soundMuted = !soundMuted;
+        if (!soundMuted) {
+          ensureAudioContext();
+        } else if (audioCtx && audioCtx.state === 'running') {
+          audioCtx.suspend().catch(() => {});
+        }
+        updateSoundIcon();
+      });
+
+      function createStereoPanner(actx, xPos) {
+        if (!actx.createStereoPanner) return null;
+        const panner = actx.createStereoPanner();
+        const normPan = ((xPos / Math.max(1, state.width)) - 0.5) * 1.4;
+        panner.pan.value = Math.max(-0.85, Math.min(0.85, normPan));
+        return panner;
+      }
+
+      // 1. Subtle Distant Mortar Launch Thump & Rising Whoosh
+      function playShellLaunchSound(xPos, duration) {
+        const actx = ensureAudioContext();
+        if (!actx || actx.state !== 'running' || !noiseBuffer) return;
+
+        const now = actx.currentTime;
+        const panner = createStereoPanner(actx, xPos);
+        const dest = panner || actx.destination;
+        if (panner) panner.connect(actx.destination);
+
+        const osc = actx.createOscillator();
+        const thumpGain = actx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(95, now);
+        osc.frequency.exponentialRampToValueAtTime(34, now + 0.14);
+
+        thumpGain.gain.setValueAtTime(0.001, now);
+        thumpGain.gain.linearRampToValueAtTime(0.14, now + 0.015);
+        thumpGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+        osc.connect(thumpGain);
+        thumpGain.connect(dest);
+        osc.start(now);
+        osc.stop(now + 0.17);
+
+        const src = actx.createBufferSource();
+        src.buffer = noiseBuffer;
+        src.loop = true;
+
+        const filter = actx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.Q.value = 3.2;
+        filter.frequency.setValueAtTime(380, now);
+        filter.frequency.exponentialRampToValueAtTime(1350, now + duration * 0.85);
+
+        const whooshGain = actx.createGain();
+        whooshGain.gain.setValueAtTime(0.001, now);
+        whooshGain.gain.linearRampToValueAtTime(0.045, now + 0.12);
+        whooshGain.gain.exponentialRampToValueAtTime(0.0008, now + duration * 0.92);
+
+        src.connect(filter);
+        filter.connect(whooshGain);
+        whooshGain.connect(dest);
+        src.start(now);
+        src.stop(now + duration);
+      }
+
+      // 2. Primary Aerial Explosion Boom + 5-Layer Scattering Shimmer ("砰——唰啦——")
+      function playFireworkExplosionAndScatterSound(xPos, fireworkType) {
+        const actx = ensureAudioContext();
+        if (!actx || actx.state !== 'running' || !noiseBuffer) return;
+
+        const now = actx.currentTime;
+        const panner = createStereoPanner(actx, xPos);
+        const dest = panner || actx.destination;
+        if (panner) panner.connect(actx.destination);
+
+        const isHeavyShell = (fireworkType === 2 || fireworkType === 5);
+        const pitchVar = 0.92 + Math.random() * 0.16;
+
+        // A. Deep Sub-Bass Chest Punch
+        const subOsc = actx.createOscillator();
+        const subGain = actx.createGain();
+        subOsc.type = 'triangle';
+        subOsc.frequency.setValueAtTime((isHeavyShell ? 135 : 150) * pitchVar, now);
+        subOsc.frequency.exponentialRampToValueAtTime(26, now + 0.42);
+
+        subGain.gain.setValueAtTime(0.001, now);
+        subGain.gain.linearRampToValueAtTime(isHeavyShell ? 0.42 : 0.32, now + 0.008);
+        subGain.gain.exponentialRampToValueAtTime(0.0005, now + 0.45);
+
+        subOsc.connect(subGain);
+        subGain.connect(dest);
+        subOsc.start(now);
+        subOsc.stop(now + 0.46);
+
+        // B. Sharp Black-Powder Burst Crack & Distant Ocean Rumble Tail
+        const boomNoise = actx.createBufferSource();
+        boomNoise.buffer = noiseBuffer;
+
+        const boomFilter = actx.createBiquadFilter();
+        boomFilter.type = 'lowpass';
+        boomFilter.frequency.setValueAtTime(1600 * pitchVar, now);
+        boomFilter.frequency.exponentialRampToValueAtTime(240, now + 0.18);
+        boomFilter.frequency.exponentialRampToValueAtTime(65, now + 1.35);
+
+        const boomGain = actx.createGain();
+        boomGain.gain.setValueAtTime(0.001, now);
+        boomGain.gain.linearRampToValueAtTime(isHeavyShell ? 0.38 : 0.28, now + 0.006);
+        boomGain.gain.exponentialRampToValueAtTime(0.07, now + 0.18);
+        boomGain.gain.exponentialRampToValueAtTime(0.0005, now + 1.4);
+
+        boomNoise.connect(boomFilter);
+        boomFilter.connect(boomGain);
+        boomGain.connect(dest);
+        boomNoise.start(now);
+        boomNoise.stop(now + 1.45);
+
+        // C. Expanding Dust Scattering / Spreading Sizzle
+        const scatterNoise = actx.createBufferSource();
+        scatterNoise.buffer = noiseBuffer;
+
+        const scatterFilter = actx.createBiquadFilter();
+        scatterFilter.type = 'bandpass';
+        scatterFilter.Q.value = 1.4;
+        scatterFilter.frequency.setValueAtTime(2400 * pitchVar, now + 0.03);
+        scatterFilter.frequency.exponentialRampToValueAtTime(680, now + 0.95);
+
+        const scatterGain = actx.createGain();
+        scatterGain.gain.setValueAtTime(0.0001, now);
+        scatterGain.gain.linearRampToValueAtTime(isHeavyShell ? 0.16 : 0.12, now + 0.08);
+        scatterGain.gain.setValueAtTime(isHeavyShell ? 0.14 : 0.10, now + 0.35);
+        scatterGain.gain.exponentialRampToValueAtTime(0.0005, now + 1.05);
+
+        scatterNoise.connect(scatterFilter);
+        scatterFilter.connect(scatterGain);
+        scatterGain.connect(dest);
+        scatterNoise.start(now + 0.02);
+        scatterNoise.stop(now + 1.1);
+      }
+
+      // 3. Secondary Golden Crackle Pop Cluster
+      let lastCrackleSoundTime = 0;
+      function playGoldenCracklePopSound(xPos) {
+        const actx = ensureAudioContext();
+        if (!actx || actx.state !== 'running' || !noiseBuffer) return;
+
+        const now = actx.currentTime;
+        if (now - lastCrackleSoundTime < 0.045) return;
+        lastCrackleSoundTime = now;
+
+        const panner = createStereoPanner(actx, xPos);
+        const dest = panner || actx.destination;
+        if (panner) panner.connect(actx.destination);
+
+        const popCount = 3 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < popCount; i++) {
+          const popStart = now + Math.random() * 0.22;
+          const src = actx.createBufferSource();
+          src.buffer = noiseBuffer;
+
+          const hp = actx.createBiquadFilter();
+          hp.type = 'bandpass';
+          hp.Q.value = 2.8;
+          hp.frequency.setValueAtTime(2200 + Math.random() * 1800, popStart);
+
+          const gain = actx.createGain();
+          gain.gain.setValueAtTime(0.001, popStart);
+          gain.gain.linearRampToValueAtTime(0.09 + Math.random() * 0.06, popStart + 0.003);
+          gain.gain.exponentialRampToValueAtTime(0.0005, popStart + 0.038);
+
+          src.connect(hp);
+          hp.connect(gain);
+          gain.connect(dest);
+          src.start(popStart, Math.random() * 1.2, 0.045);
+        }
+      }
+
+      // 6 Firework Types Definition
+      const FIREWORK_TYPES = {
+        1: {
+          name: '亮蓝色',
+          mode: 'particles',
+          color: '#00d8ff',
+          rgb: [0, 216, 255]
+        },
+        2: {
+          name: '金色锦冠拉丝',
+          mode: 'persistent_trail',
+          subStyle: 'gold_brocade',
+          color: '#fde047',
+          coreColor: '#fffef0',
+          trailColor: '#f59e0b',
+          rgb: [253, 224, 71]
+        },
+        3: {
+          name: '中间棕色周围粉色',
+          mode: 'particles',
+          centerColor: '#b8621b',
+          centerRgb: [184, 98, 27],
+          outerColor: '#ff69b4',
+          outerRgb: [255, 105, 180]
+        },
+        4: {
+          name: '亮绿色',
+          mode: 'particles',
+          color: '#22ff66',
+          rgb: [34, 255, 102]
+        },
+        5: {
+          name: '鲜红流光金闪',
+          mode: 'persistent_trail',
+          subStyle: 'red_peony_crackle',
+          color: '#ff1e3a',
+          coreColor: '#ffe4e8',
+          trailColor: '#e11d48',
+          rgb: [255, 30, 58]
+        },
+        6: {
+          name: '亮紫色',
+          mode: 'particles',
+          color: '#c84bff',
+          rgb: [200, 75, 255]
+        }
+      };
+
+      // Build procedural offscreen texture for Moon craters/maria
+      function createMoonTexture(radius) {
+        const size = Math.ceil(radius * 2.4);
+        const off = document.createElement('canvas');
+        off.width = size;
+        off.height = size;
+        const octx = off.getContext('2d');
+        const cx = size / 2;
+        const cy = size / 2;
+
+        const grad = octx.createRadialGradient(
+          cx - radius * 0.22,
+          cy - radius * 0.22,
+          radius * 0.05,
+          cx,
+          cy,
+          radius
+        );
+        grad.addColorStop(0, '#ffffff');
+        grad.addColorStop(0.65, '#fcf9ea');
+        grad.addColorStop(0.92, '#efe7ce');
+        grad.addColorStop(1, 'rgba(235, 225, 195, 0)');
+
+        octx.fillStyle = grad;
+        octx.beginPath();
+        octx.arc(cx, cy, radius, 0, Math.PI * 2);
+        octx.fill();
+
+        octx.save();
+        octx.beginPath();
+        octx.arc(cx, cy, radius * 0.97, 0, Math.PI * 2);
+        octx.clip();
+
+        const maria = [
+          { x: -0.28, y: -0.18, r: 0.36, a: 0.07 },
+          { x: 0.18, y: -0.25, r: 0.28, a: 0.06 },
+          { x: -0.12, y: 0.22, r: 0.42, a: 0.055 },
+          { x: 0.28, y: 0.12, r: 0.25, a: 0.065 },
+          { x: -0.35, y: 0.15, r: 0.22, a: 0.05 },
+          { x: 0.02, y: -0.04, r: 0.3, a: 0.05 }
+        ];
+        maria.forEach(m => {
+          const mx = cx + m.x * radius;
+          const my = cy + m.y * radius;
+          const mr = m.r * radius;
+          const mg = octx.createRadialGradient(mx, my, mr * 0.1, mx, my, mr);
+          mg.addColorStop(0, `rgba(120, 128, 145, ${m.a})`);
+          mg.addColorStop(0.7, `rgba(120, 128, 145, ${m.a * 0.5})`);
+          mg.addColorStop(1, 'rgba(120, 128, 145, 0)');
+          octx.fillStyle = mg;
+          octx.beginPath();
+          octx.arc(mx, my, mr, 0, Math.PI * 2);
+          octx.fill();
+        });
+
+        octx.restore();
+        return off;
+      }
+
+      function initSceneObjects() {
+        const count = Math.floor((state.width * state.height) / 5200);
+        stars = [];
+        for (let i = 0; i < count; i++) {
+          const yNorm = Math.pow(Math.random(), 1.35) * (state.horizonRatio - 0.02);
+          stars.push({
+            x: Math.random() * state.width,
+            y: yNorm * state.height,
+            r: Math.random() * 1.35 + 0.35,
+            baseAlpha: Math.random() * 0.65 + 0.2,
+            twinkleSpeed: Math.random() * 2.2 + 0.6,
+            phase: Math.random() * Math.PI * 2,
+            hue: Math.random() > 0.7 ? 215 : (Math.random() > 0.5 ? 45 : 0)
+          });
+        }
+
+        clouds = [];
+        const cloudCount = 8;
+        for (let i = 0; i < cloudCount; i++) {
+          clouds.push({
+            x: Math.random() * state.width,
+            y: (0.06 + Math.random() * (state.horizonRatio - 0.12)) * state.height,
+            w: (200 + Math.random() * 300) * state.scale,
+            h: (24 + Math.random() * 36) * state.scale,
+            speed: (Math.random() * 0.14 + 0.04) * (Math.random() > 0.5 ? 1 : -1),
+            alpha: Math.random() * 0.12 + 0.04,
+            puffs: Array.from({ length: 5 }, () => ({
+              ox: (Math.random() - 0.5) * 0.7,
+              oy: (Math.random() - 0.5) * 0.35,
+              sr: 0.4 + Math.random() * 0.5
+            }))
+          });
+        }
+
+        moonOffscreen = createMoonTexture(state.moonRadius);
+      }
+
+      // Responsive Auto-Landscape Layout & Canvas Resize
+      function resize() {
+        const vw = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+        const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+
+        // If viewport is in portrait mode (vw < vh), automatically rotate #stageWrapper 90deg
+        // and swap width/height so the user immediately sees a full-screen landscape presentation!
+        if (vw < vh) {
+          state.isRotatedPortrait = true;
+          state.width = vh;
+          state.height = vw;
+          stageWrapper.style.width = vh + 'px';
+          stageWrapper.style.height = vw + 'px';
+          stageWrapper.style.transform = 'translate(-50%, -50%) rotate(90deg)';
+        } else {
+          state.isRotatedPortrait = false;
+          state.width = vw;
+          state.height = vh;
+          stageWrapper.style.width = vw + 'px';
+          stageWrapper.style.height = vh + 'px';
+          stageWrapper.style.transform = 'translate(-50%, -50%) rotate(0deg)';
+        }
+
+        // Scale moon and firework dimensions proportionally to the landscape height
+        state.scale = Math.min(1.12, Math.max(0.60, state.height / 680));
+        state.moonRadius = Math.round(46 * state.scale);
+
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = state.width * dpr;
+        canvas.height = state.height * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        initSceneObjects();
+      }
+
+      window.addEventListener('resize', resize);
+      window.addEventListener('orientationchange', () => {
+        setTimeout(resize, 100);
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', resize);
+      }
+
+      // Spawn a shooting star (meteor)
+      function spawnMeteor() {
+        const startX = (0.08 + Math.random() * 0.88) * state.width;
+        const startY = (0.02 + Math.random() * 0.28) * state.height;
+        const angle = (Math.PI * 0.68) + (Math.random() - 0.5) * 0.24;
+        const speed = (12 + Math.random() * 7) * state.scale;
+        meteors.push({
+          x: startX,
+          y: startY,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          len: (100 + Math.random() * 85) * state.scale,
+          life: 1.0,
+          decay: 0.015 + Math.random() * 0.012
+        });
+      }
+
+      // Spawn a Video-Style Golden Crackle Micro-Flower ("金波/噼啪金闪花团")
+      function spawnGoldenCrackleCluster(x, y, intensityScale) {
+        const s = state.scale;
+        const petalCount = 7 + Math.floor(Math.random() * 5);
+        const petals = [];
+        for (let i = 0; i < petalCount; i++) {
+          const ang = (Math.PI * 2 * i) / petalCount + (Math.random() - 0.5) * 0.35;
+          const spd = (18 + Math.random() * 24) * (intensityScale || 1) * s;
+          petals.push({
+            cos: Math.cos(ang),
+            sin: Math.sin(ang),
+            speed: spd,
+            len: (4 + Math.random() * 6) * s
+          });
+        }
+        crackleClusters.push({
+          x: x + (Math.random() - 0.5) * 10 * s,
+          y: y + (Math.random() - 0.5) * 10 * s,
+          age: 0,
+          delay: Math.random() * 0.18,
+          maxLife: 0.42 + Math.random() * 0.26,
+          petals: petals,
+          hasStrobe: Math.random() < 0.65
+        });
+
+        playGoldenCracklePopSound(x);
+      }
+
+      // Launch a salvo of 3 realistic pyrotechnic shells from the distant ocean
+      function launchThreeShells() {
+        const w = state.width;
+        const h = state.height;
+        const horizonY = h * state.horizonRatio;
+
+        const rotatingOtherTypes = [1, 3, 4, 6];
+        const otherType = rotatingOtherTypes[salvoCount % rotatingOtherTypes.length];
+        const chosenTypes = salvoCount % 2 === 0
+          ? [5, 2, otherType]
+          : [otherType, 5, 2];
+        salvoCount++;
+
+        const xPositions = [
+          w * (0.43 + (Math.random() - 0.5) * 0.03),
+          w * (0.64 + (Math.random() - 0.5) * 0.03),
+          w * (0.84 + (Math.random() - 0.5) * 0.03)
+        ];
+
+        const targetYPositions = [
+          h * (0.23 + (Math.random() - 0.5) * 0.02),
+          h * (0.19 + (Math.random() - 0.5) * 0.02),
+          h * (0.24 + (Math.random() - 0.5) * 0.02)
+        ];
+
+        for (let i = 0; i < 3; i++) {
+          const startX = xPositions[i];
+          const startY = horizonY + (10 + Math.random() * 8) * state.scale;
+          const targetY = targetYPositions[i];
+          const flightDuration = 1.05 + i * 0.11;
+
+          shells.push({
+            x: startX,
+            prevX: startX,
+            y: startY,
+            prevY: startY,
+            startX: startX,
+            startY: startY,
+            targetY: targetY,
+            swayAmp: (Math.random() - 0.5) * 6 * state.scale,
+            elapsed: -i * 0.14,
+            launchSoundPlayed: false,
+            duration: flightDuration,
+            fireworkType: chosenTypes[i],
+            headRadius: Math.max(2.0, 2.8 * state.scale)
+          });
+        }
+      }
+
+      // Create a 5-layer, 15-degree-interval firework explosion at (cx, cy)
+      function createFireworkExplosion(cx, cy, fireworkType) {
+        playFireworkExplosionAndScatterSound(cx, fireworkType);
+
+        const cfg = FIREWORK_TYPES[fireworkType];
+        const s = state.scale;
+        const numLayers = 5;
+        const angleStepDeg = 15; // Every 15 degrees -> 24 particles per layer
+        const layerInterval = cfg.mode === 'persistent_trail' ? 0.065 : 0.14;
+
+        const baseDirs = [];
+        for (let deg = 0; deg < 360; deg += angleStepDeg) {
+          const rad = (deg * Math.PI) / 180;
+          baseDirs.push({
+            rad: rad,
+            cos: Math.cos(rad),
+            sin: Math.sin(rad)
+          });
+        }
+
+        const layers = [];
+        for (let l = 0; l < numLayers; l++) {
+          let layerColor = cfg.color;
+          let layerRgb = cfg.rgb;
+          const depthScale = 1.0 - l * 0.145;
+          let maxDist = (cfg.mode === 'persistent_trail' ? 152 : 124) * depthScale * s;
+          let speed = (cfg.mode === 'persistent_trail' ? 160 : 94) * depthScale * s;
+
+          if (fireworkType === 3) {
+            if (l >= 3) {
+              layerColor = cfg.centerColor;
+              layerRgb = cfg.centerRgb;
+              maxDist = (66 - (l - 3) * 12) * s;
+              speed = (62 - (l - 3) * 8) * s;
+            } else {
+              layerColor = cfg.outerColor;
+              layerRgb = cfg.outerRgb;
+              maxDist = (130 - l * 10) * s;
+              speed = (100 - l * 6) * s;
+            }
+          }
+
+          const layerAngleOffset = (l * 3.0 * Math.PI) / 180;
+          const layerDirs = baseDirs.map((d, idx) => {
+            const jitter = cfg.mode === 'persistent_trail'
+              ? Math.sin(l * 17.3 + idx * 9.7) * 0.035
+              : 0;
+            const ang = d.rad + layerAngleOffset + jitter;
+            const lenVar = cfg.mode === 'persistent_trail'
+              ? 0.92 + 0.14 * Math.cos(l * 11.1 + idx * 5.3)
+              : 1.0;
+            return {
+              cos: Math.cos(ang) * lenVar,
+              sin: Math.sin(ang) * lenVar
+            };
+          });
+
+          let trailCanvas = null;
+          let trailCtx = null;
+          const canvasSize = Math.ceil(maxDist * 2.4 + 50);
+          if (cfg.mode === 'persistent_trail') {
+            trailCanvas = document.createElement('canvas');
+            trailCanvas.width = canvasSize;
+            trailCanvas.height = canvasSize;
+            trailCtx = trailCanvas.getContext('2d');
+          }
+
+          layers.push({
+            index: l,
+            startDelay: l * layerInterval,
+            speed: speed,
+            maxDist: maxDist,
+            initialRadius: (cfg.mode === 'persistent_trail' ? (fireworkType === 2 ? 2.1 : 2.8) : 4.4) * Math.max(0.75, s),
+            color: layerColor,
+            coreColor: cfg.coreColor || '#ffffff',
+            trailColor: cfg.trailColor || layerColor,
+            rgb: layerRgb,
+            dirs: layerDirs,
+            prevDist: 0,
+            prevDrop: 0,
+            active: true,
+            trailCanvas: trailCanvas,
+            trailCtx: trailCtx,
+            canvasHalf: canvasSize / 2
+          });
+        }
+
+        fireworks.push({
+          cx: cx,
+          cy: cy,
+          type: fireworkType,
+          mode: cfg.mode,
+          subStyle: cfg.subStyle || '',
+          rgb: cfg.rgb || [255, 180, 220],
+          age: 0,
+          layers: layers
+        });
+      }
+
+      // Draw a Realistic Rising Pyrotechnic Shell
+      function drawRealisticRisingShell(sh, progress) {
+        const x = sh.x;
+        const y = sh.y;
+        const r = sh.headRadius;
+
+        const speedFactor = Math.max(0.18, 1 - progress * 0.78);
+        const tailLen = (26 + 36 * speedFactor) * state.scale;
+
+        const dx = x - sh.prevX;
+        const dy = y - sh.prevY;
+        const angle = Math.atan2(dy, dx) + Math.PI / 2;
+
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+
+        const tailGrad = ctx.createLinearGradient(0, 0, 0, tailLen);
+        tailGrad.addColorStop(0, 'rgba(255, 250, 235, 0.95)');
+        tailGrad.addColorStop(0.22, 'rgba(253, 186, 116, 0.75)');
+        tailGrad.addColorStop(0.55, 'rgba(244, 63, 94, 0.35)');
+        tailGrad.addColorStop(1, 'rgba(159, 18, 57, 0)');
+
+        ctx.fillStyle = tailGrad;
+        ctx.beginPath();
+        ctx.moveTo(0, -r * 1.15);
+        ctx.quadraticCurveTo(r * 1.1, 0, r * 0.45, tailLen * 0.45);
+        ctx.lineTo(0, tailLen);
+        ctx.lineTo(-r * 0.45, tailLen * 0.45);
+        ctx.quadraticCurveTo(-r * 1.1, 0, 0, -r * 1.15);
+        ctx.closePath();
+        ctx.fill();
+
+        const haloR = r * 4.2;
+        const haloGrad = ctx.createRadialGradient(0, 0, r * 0.2, 0, 0, haloR);
+        haloGrad.addColorStop(0, 'rgba(255, 245, 214, 0.85)');
+        haloGrad.addColorStop(0.35, 'rgba(251, 146, 60, 0.38)');
+        haloGrad.addColorStop(0.7, 'rgba(225, 29, 72, 0.14)');
+        haloGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = haloGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, haloR, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, r * 0.75, r * 1.1, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      // Update & Draw Trailing Fuse Ember Sparks shed by rising shells
+      function updateAndDrawShellSparks(dt) {
+        if (shellSparks.length === 0) return;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = shellSparks.length - 1; i >= 0; i--) {
+          const sp = shellSparks[i];
+          sp.life -= dt * sp.decay;
+          if (sp.life <= 0) {
+            shellSparks.splice(i, 1);
+            continue;
+          }
+          sp.x += sp.vx * dt;
+          sp.y += sp.vy * dt;
+          sp.vy += 38 * state.scale * dt;
+
+          const alpha = sp.life;
+          ctx.fillStyle = sp.isGold
+            ? `rgba(253, 224, 71, ${alpha})`
+            : `rgba(251, 113, 133, ${alpha * 0.85})`;
+          ctx.beginPath();
+          ctx.arc(sp.x, sp.y, sp.r * (0.4 + 0.6 * alpha), 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // Update & Draw Secondary Golden Crackle Micro-Flowers
+      function updateAndDrawCrackleClusters(dt) {
+        if (crackleClusters.length === 0) return;
+
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+
+        for (let i = crackleClusters.length - 1; i >= 0; i--) {
+          const cl = crackleClusters[i];
+          cl.age += dt;
+          if (cl.age < cl.delay) continue;
+
+          const activeAge = cl.age - cl.delay;
+          const progress = activeAge / cl.maxLife;
+          if (progress >= 1.0) {
+            crackleClusters.splice(i, 1);
+            continue;
+          }
+
+          const easeOut = 1 - Math.pow(1 - progress, 2.4);
+          const alpha = (1 - progress) * 0.95;
+
+          const puffR = (12 + easeOut * 16) * state.scale;
+          const puffGrad = ctx.createRadialGradient(cl.x, cl.y, 1, cl.x, cl.y, puffR);
+          puffGrad.addColorStop(0, `rgba(255, 250, 220, ${alpha * 0.7})`);
+          puffGrad.addColorStop(0.4, `rgba(251, 191, 36, ${alpha * 0.45})`);
+          puffGrad.addColorStop(1, 'rgba(180, 83, 9, 0)');
+          ctx.fillStyle = puffGrad;
+          ctx.beginPath();
+          ctx.arc(cl.x, cl.y, puffR, 0, Math.PI * 2);
+          ctx.fill();
+
+          if (cl.hasStrobe && progress < 0.45 && Math.sin(activeAge * 65) > -0.2) {
+            ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(cl.x, cl.y, 2.2 * state.scale, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          ctx.strokeStyle = `rgba(253, 224, 71, ${alpha})`;
+          ctx.lineWidth = Math.max(1.0, 1.35 * state.scale);
+          ctx.lineCap = 'round';
+          for (let p = 0; p < cl.petals.length; p++) {
+            const pt = cl.petals[p];
+            const rEnd = pt.speed * activeAge * (1 - progress * 0.35);
+            const rStart = Math.max(0, rEnd - pt.len * (1 - progress * 0.5));
+            const sx = cl.x + pt.cos * rStart;
+            const sy = cl.y + pt.sin * rStart + activeAge * activeAge * 18 * state.scale;
+            const ex = cl.x + pt.cos * rEnd;
+            const ey = cl.y + pt.sin * rEnd + activeAge * activeAge * 18 * state.scale;
+
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+
+            ctx.fillStyle = `rgba(255, 248, 220, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(ex, ey, 1.2 * state.scale * (1 - progress * 0.6), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        ctx.restore();
+      }
+
+      // Update & Draw Rising Shells and Firework Explosions
+      function updateAndDrawFireworks(dt) {
+        // 1. Rising Pyrotechnic Shells
+        for (let i = shells.length - 1; i >= 0; i--) {
+          const sh = shells[i];
+          sh.elapsed += dt;
+          if (sh.elapsed < 0) continue;
+
+          if (!sh.launchSoundPlayed) {
+            sh.launchSoundPlayed = true;
+            playShellLaunchSound(sh.x, sh.duration);
+          }
+
+          const progress = Math.min(1, sh.elapsed / sh.duration);
+          const eased = 1 - Math.pow(1 - progress, 2.15);
+
+          sh.prevX = sh.x;
+          sh.prevY = sh.y;
+          sh.x = sh.startX + Math.sin(progress * Math.PI) * sh.swayAmp;
+          sh.y = sh.startY + (sh.targetY - sh.startY) * eased;
+
+          if (Math.random() < 0.85) {
+            shellSparks.push({
+              x: sh.x + (Math.random() - 0.5) * 2.5 * state.scale,
+              y: sh.y + (3 + Math.random() * 6) * state.scale,
+              vx: (Math.random() - 0.5) * 18 * state.scale,
+              vy: (15 + Math.random() * 28) * state.scale,
+              r: (0.8 + Math.random() * 1.1) * Math.max(0.75, state.scale),
+              life: 1.0,
+              decay: 2.2 + Math.random() * 1.5,
+              isGold: Math.random() > 0.35
+            });
+          }
+
+          drawRealisticRisingShell(sh, progress);
+
+          if (progress >= 1) {
+            createFireworkExplosion(sh.x, sh.y, sh.fireworkType);
+            shells.splice(i, 1);
+          }
+        }
+
+        // Draw detached rising shell sparks
+        updateAndDrawShellSparks(dt);
+
+        // 2. Expanding Fireworks
+        for (let f = fireworks.length - 1; f >= 0; f--) {
+          const fw = fireworks[f];
+          fw.age += dt;
+          let anyLayerActive = false;
+
+          if (fw.age < 0.26) {
+            const flashAlpha = (1 - fw.age / 0.26) * 0.75;
+            const flashR = (25 + fw.age * 240) * state.scale;
+            const [fr, fg, fb] = fw.rgb;
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            const fgGrad = ctx.createRadialGradient(fw.cx, fw.cy, 2, fw.cx, fw.cy, flashR);
+            fgGrad.addColorStop(0, `rgba(255, 255, 255, ${flashAlpha})`);
+            fgGrad.addColorStop(0.35, `rgba(${fr}, ${fg}, ${fb}, ${flashAlpha * 0.65})`);
+            fgGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = fgGrad;
+            ctx.beginPath();
+            ctx.arc(fw.cx, fw.cy, flashR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+
+          for (let l = 0; l < fw.layers.length; l++) {
+            const layer = fw.layers[l];
+            if (!layer.active) continue;
+
+            const layerTime = fw.age - layer.startDelay;
+            if (layerTime < 0) {
+              anyLayerActive = true;
+              continue;
+            }
+
+            const rawDist = layerTime * layer.speed;
+            const progress = rawDist / layer.maxDist;
+
+            if (progress >= 1.0) {
+              if (fw.mode === 'persistent_trail') {
+                const decelDist = layer.maxDist * 0.88;
+                const gravDrop = 22 * state.scale * layerTime * layerTime;
+                for (let d = 0; d < layer.dirs.length; d++) {
+                  const spawnProb = fw.type === 5 ? 0.62 : 0.38;
+                  if (Math.random() < spawnProb) {
+                    const dir = layer.dirs[d];
+                    const tipX = fw.cx + dir.cos * decelDist;
+                    const tipY = fw.cy + dir.sin * decelDist + gravDrop;
+                    spawnGoldenCrackleCluster(tipX, tipY, fw.type === 5 ? 1.05 : 0.85);
+                  }
+                }
+                if (layer.trailCtx && layer.trailCanvas) {
+                  layer.trailCtx.clearRect(0, 0, layer.trailCanvas.width, layer.trailCanvas.height);
+                }
+              }
+              layer.active = false;
+              continue;
+            }
+
+            anyLayerActive = true;
+
+            if (fw.mode === 'particles') {
+              const currentRadius = Math.max(0.45, layer.initialRadius * (1 - progress * 0.85));
+              const alpha = progress < 0.8 ? 1.0 : (1.0 - (progress - 0.8) / 0.2);
+              const [r, g, b] = layer.rgb;
+
+              ctx.save();
+              ctx.globalCompositeOperation = 'lighter';
+              ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+              ctx.shadowColor = layer.color;
+              ctx.shadowBlur = 8;
+
+              for (let d = 0; d < layer.dirs.length; d++) {
+                const dir = layer.dirs[d];
+                const px = fw.cx + dir.cos * rawDist;
+                const py = fw.cy + dir.sin * rawDist;
+                ctx.beginPath();
+                ctx.arc(px, py, currentRadius, 0, Math.PI * 2);
+                ctx.fill();
+              }
+              ctx.restore();
+            } else if (fw.mode === 'persistent_trail') {
+              const easedProgress = 1 - Math.pow(1 - progress, 1.65);
+              const dist = easedProgress * layer.maxDist;
+              const drop = 22 * state.scale * layerTime * layerTime;
+
+              const tctx = layer.trailCtx;
+              const half = layer.canvasHalf;
+              const particleRadius = layer.initialRadius * (1 - progress * 0.32);
+
+              tctx.save();
+              tctx.lineCap = 'round';
+
+              for (let d = 0; d < layer.dirs.length; d++) {
+                const dir = layer.dirs[d];
+                const prevX = half + dir.cos * layer.prevDist;
+                const prevY = half + dir.sin * layer.prevDist + layer.prevDrop;
+                const currX = half + dir.cos * dist;
+                const currY = half + dir.sin * dist + drop;
+
+                tctx.strokeStyle = layer.trailColor;
+                tctx.lineWidth = particleRadius * 2.2;
+                tctx.beginPath();
+                tctx.moveTo(prevX, prevY);
+                tctx.lineTo(currX, currY);
+                tctx.stroke();
+
+                tctx.strokeStyle = layer.color;
+                tctx.lineWidth = particleRadius * 1.25;
+                tctx.beginPath();
+                tctx.moveTo(prevX, prevY);
+                tctx.lineTo(currX, currY);
+                tctx.stroke();
+
+                tctx.fillStyle = layer.color;
+                tctx.beginPath();
+                tctx.arc(currX, currY, particleRadius, 0, Math.PI * 2);
+                tctx.fill();
+              }
+              tctx.restore();
+
+              layer.prevDist = dist;
+              layer.prevDrop = drop;
+
+              ctx.save();
+              ctx.globalCompositeOperation = 'lighter';
+              ctx.shadowColor = layer.color;
+              ctx.shadowBlur = fw.type === 5 ? 10 : 7;
+              ctx.drawImage(
+                layer.trailCanvas,
+                fw.cx - half,
+                fw.cy - half
+              );
+
+              ctx.fillStyle = layer.coreColor;
+              for (let d = 0; d < layer.dirs.length; d++) {
+                const dir = layer.dirs[d];
+                const tipX = fw.cx + dir.cos * dist;
+                const tipY = fw.cy + dir.sin * dist + drop;
+                ctx.beginPath();
+                ctx.arc(tipX, tipY, particleRadius * 0.85, 0, Math.PI * 2);
+                ctx.fill();
+              }
+              ctx.restore();
+            }
+          }
+
+          if (!anyLayerActive) {
+            fireworks.splice(f, 1);
+          }
+        }
+
+        // 3. Draw Secondary Golden Crackle Micro-Flowers
+        updateAndDrawCrackleClusters(dt);
+      }
+
+      // Draw Sky, Stars, Meteors, Fixed Moon, Clouds
+      function drawSky(t, theme) {
+        const w = state.width;
+        const h = state.height;
+        const horizonY = h * state.horizonRatio;
+        const moonPxX = state.moonX * w;
+        const moonPxY = state.moonY * h;
+
+        // 1. Sky Background Gradient
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
+        skyGrad.addColorStop(0, theme.skyTop);
+        skyGrad.addColorStop(0.58, theme.skyMid);
+        skyGrad.addColorStop(1, theme.skyHorizon);
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, w, horizonY + 2);
+
+        // 2. Horizon Atmospheric Glow below fixed moon (at 1/5 from left)
+        const horizonGlow = ctx.createRadialGradient(
+          moonPxX, horizonY, 10,
+          moonPxX, horizonY, Math.max(w * 0.42, 260)
+        );
+        const [gr, gg, gb] = theme.glowTint;
+        horizonGlow.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, 0.22)`);
+        horizonGlow.addColorStop(0.45, `rgba(${gr}, ${gg}, ${gb}, 0.07)`);
+        horizonGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = horizonGlow;
+        ctx.fillRect(0, 0, w, horizonY + 2);
+
+        // 3. Twinkling Stars
+        for (let i = 0; i < stars.length; i++) {
+          const s = stars[i];
+          const dx = s.x - moonPxX;
+          const dy = s.y - moonPxY;
+          const distToMoon = Math.hypot(dx, dy);
+          if (distToMoon < state.moonRadius * 2.2) continue;
+
+          const moonFade = Math.min(1, (distToMoon - state.moonRadius * 2.2) / (140 * state.scale));
+          const twinkle = 0.65 + 0.35 * Math.sin(t * s.twinkleSpeed + s.phase);
+          const alpha = s.baseAlpha * twinkle * moonFade;
+
+          ctx.fillStyle = s.hue === 0
+            ? `rgba(255, 255, 255, ${alpha})`
+            : `hsla(${s.hue}, 80%, 88%, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // 4. Shooting Stars (Meteors)
+        for (let i = meteors.length - 1; i >= 0; i--) {
+          const m = meteors[i];
+          m.x += m.vx;
+          m.y += m.vy;
+          m.life -= m.decay;
+          if (m.life <= 0 || m.y > horizonY || m.x < -100 || m.x > w + 100) {
+            meteors.splice(i, 1);
+            continue;
+          }
+          const speedMag = Math.hypot(m.vx, m.vy);
+          const tailX = m.x - (m.vx / speedMag) * m.len * m.life;
+          const tailY = m.y - (m.vy / speedMag) * m.len * m.life;
+          const mg = ctx.createLinearGradient(m.x, m.y, tailX, tailY);
+          mg.addColorStop(0, `rgba(255, 255, 255, ${m.life})`);
+          mg.addColorStop(0.3, `rgba(254, 240, 138, ${m.life * 0.65})`);
+          mg.addColorStop(1, 'rgba(255, 255, 255, 0)');
+          ctx.strokeStyle = mg;
+          ctx.lineWidth = Math.max(1.4, 2.0 * state.scale);
+          ctx.beginPath();
+          ctx.moveTo(m.x, m.y);
+          ctx.lineTo(tailX, tailY);
+          ctx.stroke();
+
+          ctx.fillStyle = `rgba(255, 255, 255, ${m.life})`;
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, Math.max(1.3, 1.8 * state.scale), 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // 5. Multi-layer Moon Corona & Outer Halo
+        const [mr, mg, mb] = theme.moonTint;
+        const outerHaloR = state.moonRadius * 7.5;
+        const outerHalo = ctx.createRadialGradient(
+          moonPxX, moonPxY, state.moonRadius * 0.85,
+          moonPxX, moonPxY, outerHaloR
+        );
+        outerHalo.addColorStop(0, `rgba(${mr}, ${mg}, ${mb}, 0.36)`);
+        outerHalo.addColorStop(0.18, `rgba(${mr}, ${mg}, ${mb}, 0.16)`);
+        outerHalo.addColorStop(0.45, `rgba(${gr}, ${gg}, ${gb}, 0.06)`);
+        outerHalo.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = outerHalo;
+        ctx.beginPath();
+        ctx.arc(moonPxX, moonPxY, outerHaloR, 0, Math.PI * 2);
+        ctx.fill();
+
+        const innerBloom = ctx.createRadialGradient(
+          moonPxX, moonPxY, state.moonRadius * 0.7,
+          moonPxX, moonPxY, state.moonRadius * 1.65
+        );
+        innerBloom.addColorStop(0, 'rgba(255, 255, 250, 0.95)');
+        innerBloom.addColorStop(0.55, `rgba(${mr}, ${mg}, ${mb}, 0.35)`);
+        innerBloom.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = innerBloom;
+        ctx.beginPath();
+        ctx.arc(moonPxX, moonPxY, state.moonRadius * 1.65, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 6. Moon Disc with Subtle Maria Texture
+        if (moonOffscreen) {
+          const texSize = moonOffscreen.width;
+          ctx.drawImage(
+            moonOffscreen,
+            moonPxX - texSize / 2,
+            moonPxY - texSize / 2
+          );
+        }
+
+        // 7. Drifting Night Clouds
+        if (state.cloudsOpacity > 0.01) {
+          for (let i = 0; i < clouds.length; i++) {
+            const c = clouds[i];
+            c.x += c.speed * (0.6 + state.wind);
+            if (c.x - c.w > w) c.x = -c.w;
+            if (c.x + c.w < 0) c.x = w + c.w;
+
+            const distMoon = Math.hypot(c.x - moonPxX, c.y - moonPxY);
+            const moonLit = Math.max(0, 1 - distMoon / (state.moonRadius * 6.5));
+            const baseAlpha = c.alpha * state.cloudsOpacity;
+
+            for (let p = 0; p < c.puffs.length; p++) {
+              const pf = c.puffs[p];
+              const px = c.x + pf.ox * c.w;
+              const py = c.y + pf.oy * c.h;
+              const pr = c.w * pf.sr * 0.45;
+
+              const cg = ctx.createRadialGradient(px, py, pr * 0.1, px, py, pr);
+              const rCol = Math.round(30 + moonLit * (mr - 30));
+              const gCol = Math.round(45 + moonLit * (mg - 45));
+              const bCol = Math.round(75 + moonLit * (mb - 75));
+              const aCol = baseAlpha * (1 + moonLit * 1.4);
+
+              cg.addColorStop(0, `rgba(${rCol}, ${gCol}, ${bCol}, ${aCol})`);
+              cg.addColorStop(1, 'rgba(15, 23, 42, 0)');
+
+              ctx.save();
+              ctx.translate(px, py);
+              ctx.scale(1, 0.24);
+              ctx.fillStyle = cg;
+              ctx.beginPath();
+              ctx.arc(0, 0, pr, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.restore();
+            }
+          }
+        }
+      }
+
+      // Draw Calm Sea Surface & Fixed Moonlight Path at 1/5 from Left Border
+      function drawSea(t, theme) {
+        const w = state.width;
+        const h = state.height;
+        const horizonY = Math.floor(h * state.horizonRatio);
+        const seaHeight = h - horizonY;
+        const moonPxX = state.moonX * w;
+        const [mr, mg, mb] = theme.moonTint;
+        const [sr, sg, sb] = theme.specTint;
+        const [gr, gg, gb] = theme.glowTint;
+
+        // 1. Base Deep Sea Gradient
+        const seaGrad = ctx.createLinearGradient(0, horizonY, 0, h);
+        seaGrad.addColorStop(0, theme.seaHorizon);
+        seaGrad.addColorStop(0.38, theme.seaMid);
+        seaGrad.addColorStop(1, theme.seaDeep);
+        ctx.fillStyle = seaGrad;
+        ctx.fillRect(0, horizonY, w, seaHeight);
+
+        // 2. Soft Ambient Water Reflection Column directly beneath the fixed moon (at 1/5 width)
+        const colGrad = ctx.createRadialGradient(
+          moonPxX, horizonY + seaHeight * 0.25, state.moonRadius * 0.4,
+          moonPxX, horizonY + seaHeight * 0.45, Math.max(w * 0.30, 220)
+        );
+        colGrad.addColorStop(0, `rgba(${mr}, ${mg}, ${mb}, 0.20)`);
+        colGrad.addColorStop(0.35, `rgba(${gr}, ${gg}, ${gb}, 0.08)`);
+        colGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = colGrad;
+        ctx.fillRect(0, horizonY, w, seaHeight);
+
+        // Subtle warm water glow under rising shells near the horizon
+        for (let i = 0; i < shells.length; i++) {
+          const sh = shells[i];
+          if (sh.elapsed >= 0 && sh.elapsed < 0.45) {
+            const launchAlpha = (1 - sh.elapsed / 0.45) * 0.18;
+            const launchGrad = ctx.createRadialGradient(
+              sh.x, horizonY + 12 * state.scale, 2,
+              sh.x, horizonY + 12 * state.scale, 60 * state.scale
+            );
+            launchGrad.addColorStop(0, `rgba(253, 186, 116, ${launchAlpha})`);
+            launchGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = launchGrad;
+            ctx.fillRect(0, horizonY, w, seaHeight);
+          }
+        }
+
+        // Subtle colored water reflections under active fireworks
+        for (let f = 0; f < fireworks.length; f++) {
+          const fw = fireworks[f];
+          if (fw.age < 1.3) {
+            const [fr, fg, fb] = fw.rgb;
+            const reflAlpha = Math.max(0, (1 - fw.age / 1.3) * 0.14);
+            const reflGrad = ctx.createRadialGradient(
+              fw.cx, horizonY + seaHeight * 0.18, 10,
+              fw.cx, horizonY + seaHeight * 0.28, 165 * state.scale
+            );
+            reflGrad.addColorStop(0, `rgba(${fr}, ${fg}, ${fb}, ${reflAlpha})`);
+            reflGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = reflGrad;
+            ctx.fillRect(0, horizonY, w, seaHeight);
+          }
+        }
+
+        // Crisp Horizon Mist Line
+        const mistGrad = ctx.createLinearGradient(0, horizonY - 2, 0, horizonY + 6);
+        mistGrad.addColorStop(0, 'rgba(255, 255, 255, 0)');
+        mistGrad.addColorStop(0.5, `rgba(${gr}, ${gg}, ${gb}, 0.22)`);
+        mistGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = mistGrad;
+        ctx.fillRect(0, horizonY - 2, w, 8);
+
+        // 3. Layered Perspective Wave Scanlines & Specular Moonlight Path
+        const windFactor = state.wind;
+        const shimmerFactor = state.shimmer;
+        const moonElevationFactor = Math.max(0.4, 1 - state.moonY / state.horizonRatio);
+
+        let y = horizonY + 1;
+        let rowIdx = 0;
+
+        while (y < h) {
+          const z = (y - horizonY) / seaHeight;
+          const perspective = Math.pow(z, 1.55);
+          const stepY = (1.0 + perspective * 4.2) * Math.max(0.75, state.scale);
+
+          const phase1 = t * (1.1 + windFactor * 1.4) + rowIdx * 0.37;
+          const phase2 = -t * (0.75 + windFactor) + rowIdx * 0.61;
+          const phase3 = t * 0.45 + z * 14.0;
+
+          const waveOffset =
+            (Math.sin(phase1) * (8 + perspective * 45) * windFactor +
+            Math.cos(phase2 * 1.3) * (5 + perspective * 28) * windFactor) * state.scale;
+
+          const swellAlpha = (0.03 + 0.06 * Math.sin(phase3 + Math.cos(rowIdx * 0.2))) * (1 - z * 0.3);
+          ctx.fillStyle = `rgba(${gr}, ${gg}, ${gb}, ${Math.max(0.01, swellAlpha)})`;
+
+          const ambientCount = 3;
+          for (let a = 0; a < ambientCount; a++) {
+            const seed = (rowIdx * 73 + a * 199) % 1000 / 1000;
+            const ambX = ((seed * w + Math.sin(phase1 + a) * 35) % w + w) % w;
+            const ambW = (18 + z * 95) * state.scale * (0.5 + 0.5 * Math.sin(t + rowIdx + a));
+            ctx.fillRect(ambX - ambW / 2, y, ambW, Math.max(0.8, stepY * 0.42));
+          }
+
+          // Primary Moonlight Reflection Path fixed at moonPxX (1/5 of screen from left)
+          const baseSpread = state.moonRadius * (0.55 + z * (2.6 + windFactor * 2.2)) * moonElevationFactor;
+          const centerShift = waveOffset * (0.35 + z * 0.65);
+          const ribbonCenter = moonPxX + centerShift;
+
+          const subSegments = Math.max(2, Math.floor((2 + z * 5) * shimmerFactor));
+          for (let s = 0; s < subSegments; s++) {
+            const sHash = Math.sin(rowIdx * 12.9898 + s * 78.233);
+            const localWave = Math.sin(t * (2.0 + (s % 3) * 0.7) + rowIdx * 0.85 + s * 2.1);
+
+            const offsetRatio = (sHash * 0.85 + localWave * 0.35 * windFactor);
+            const segX = ribbonCenter + offsetRatio * baseSpread;
+
+            const segWidth = Math.max(
+              2,
+              (state.moonRadius * (0.38 + z * 0.75) * (0.45 + 0.55 * Math.cos(localWave * 1.4))) /
+                Math.sqrt(subSegments * 0.45)
+            );
+
+            const distFromAxis = Math.abs(segX - moonPxX) / (baseSpread * 1.35 + 1);
+            const intensity = Math.max(0, 1 - distFromAxis * distFromAxis) * (0.35 + 0.65 * (1 - z * 0.35));
+
+            if (intensity > 0.04) {
+              const alpha = Math.min(0.92, intensity * (0.45 + 0.45 * shimmerFactor));
+              const lineH = Math.max(1.0, stepY * 0.58);
+
+              ctx.fillStyle = `rgba(${mr}, ${mg}, ${mb}, ${alpha * 0.45})`;
+              ctx.fillRect(segX - segWidth * 0.7, y - 0.5, segWidth * 1.4, lineH + 1.0);
+
+              ctx.fillStyle = `rgba(${sr}, ${sg}, ${sb}, ${alpha})`;
+              ctx.fillRect(segX - segWidth * 0.45, y, segWidth * 0.9, lineH);
+
+              const glintTrigger = Math.sin(t * 4.8 + rowIdx * 3.1 + s * 5.7);
+              if (glintTrigger > 0.965 - shimmerFactor * 0.03) {
+                const gx = segX + (sHash * segWidth * 0.3);
+                const grSize = (1.2 + z * 2.4) * state.scale * ((glintTrigger - 0.92) * 12);
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(gx - grSize * 2, y - 0.4, grSize * 4, 1.2);
+                ctx.fillRect(gx - 0.6, y - grSize * 1.2, 1.2, grSize * 2.4);
+              }
+            }
+          }
+
+          y += stepY;
+          rowIdx++;
+        }
+      }
+
+      // Main Animation Loop
+      let lastFrameTime = performance.now();
+      let meteorAccumulator = 0;
+
+      function animate(now) {
+        const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
+        lastFrameTime = now;
+        state.time += dt;
+
+        // Phase 1: First 3 seconds -> Intensive Meteor Shower
+        if (state.time < 3.0) {
+          meteorAccumulator += dt;
+          while (meteorAccumulator >= 0.09) {
+            spawnMeteor();
+            meteorAccumulator -= 0.09;
+          }
+        } else {
+          // Phase 2: After 3 seconds -> 3 Realistic Pyrotechnic Shells rise from distant ocean & burst into fireworks
+          if (state.time >= nextSalvoTime && shells.length === 0 && fireworks.length === 0 && crackleClusters.length === 0) {
+            launchThreeShells();
+            nextSalvoTime = state.time + 3.0;
+          }
+        }
+
+        drawSky(state.time, THEME);
+        drawSea(state.time, THEME);
+        updateAndDrawFireworks(dt);
+
+        requestAnimationFrame(animate);
+      }
+
+      window.onload = function () {
+        resize();
+        ensureAudioContext();
+        for (let i = 0; i < 6; i++) {
+          spawnMeteor();
+        }
+        requestAnimationFrame(animate);
+      };
+    })();
+  </script>
+</body>
+</html>
